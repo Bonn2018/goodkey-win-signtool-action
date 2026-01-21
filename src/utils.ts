@@ -247,7 +247,11 @@ export async function signFile(options: SignOptions) {
       core.debug(`   stderr: ${stderr.trim()}`);
     }
     core.info(`   ✅ File signed successfully: ${options.file}`);
-  } catch (error) {
+  } catch (error: any) {
+    core.debug(`   Signtool call failed: ${error}`);
+    core.debug(`   Error details: ${('toString' in error ? error.toString() : 'unknown')}`);
+    core.debug(`   Error stringify: ${JSON.stringify(error)}`);
+
     if (error instanceof Error) {
       const message = 'stdout' in error && error.stdout ? error.stdout.toString() : error.message;
       throw new Error(`Signing of file failed: ${message}`);
