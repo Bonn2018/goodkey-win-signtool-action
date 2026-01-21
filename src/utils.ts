@@ -85,10 +85,105 @@ export async function installGoodKey(distDir: string, systemDir: string) {
 
     // Register DLLs
     core.info(`🔧 Registering DLLs...`);
-    core.debug(`   Registering: ${keyProvFile}`);
-    await execAsync(`regsvr32.exe /s "${path.join(systemDir, keyProvFile)}"`);
-    core.debug(`   Registering: ${certProvFile}`);
-    await execAsync(`regsvr32.exe /s "${path.join(systemDir, certProvFile)}"`);
+    
+    const registerDll = async (dllPath: string, dllName: string) => {
+      core.info(`   Registering: ${dllName}`);
+      
+      // Verify DLL file exists and is accessible
+      try {
+        await fs.access(dllPath, fs.constants.R_OK);
+        const stats = await fs.stat(dllPath);
+        core.debug(`     ✓ DLL file exists (${stats.size} bytes)`);
+      } catch (e) {
+        throw new Error(`DLL file ${dllName} is not accessible at ${dllPath}: ${e}`);
+      }
+      
+      // Wait a bit to ensure file is not locked
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Try registration without /s first to see the actual error
+      try {
+        core.debug(`     Attempting registration (verbose mode to capture errors)...`);
+        const { stdout, stderr } = await execAsync(`regsvr32.exe "${dllPath}"`);
+        
+        if (stdout) {
+          core.debug(`     stdout: ${stdout}`);
+        }
+        if (stderr) {
+          core.debug(`     stderr: ${stderr}`);
+        }
+        
+        // Check if registration was successful
+        if (stdout.includes('succeeded') || stdout.includes('DllRegisterServer')) {
+          core.info(`     ✅ Registered successfully`);
+        } else {
+          // If no clear success message but no error, assume success and try silent mode for confirmation
+          core.debug(`     Retrying with silent mode for confirmation...`);
+          await execAsync(`regsvr32.exe /s "${dllPath}"`);
+          core.info(`     ✅ Registered successfully`);
+        }
+      } catch (error: any) {
+        const errorOutput = error.stderr || error.stdout || error.message || '';
+        core.error(`     ❌ Registration failed`);
+        core.error(`     Error details: ${errorOutput}`);
+        
+        // Try to get more details using PowerShell if available
+        try {
+          const { stdout: psError } = await execAsync(
+            `powershell.exe -Command "$ErrorActionPreference='Continue'; try { regsvr32.exe '${dllPath}' 2>&1 | Out-String } catch { $_.Exception.Message }"`
+          );
+          if (psError && psError.trim()) {
+            core.error(`     PowerShell error output: ${psError.trim()}`);
+          }
+        } catch (psErr) {
+          // Ignore PowerShell errors
+          core.debug(`     Could not get PowerShell error details: ${psErr}`);
+        }
+        
+        // Check for specific error codes
+        const errorStr = errorOutput.toString().toLowerCase();
+        if (errorStr.includes('0x80070005') || errorStr.includes('access denied')) {
+          throw new Error(
+            `Access denied (0x80070005): regsvr32 requires administrator privileges to register DLLs in System32. ` +
+            `The GitHub Actions runner may not have sufficient permissions. ` +
+            `Original error: ${errorOutput}`
+          );
+        } else if (errorStr.includes('0x80004005')) {
+          throw new Error(
+            `Unspecified error (0x80004005): The DLL may be missing dependencies or incompatible with this Windows version. ` +
+            `Original error: ${errorOutput}`
+          );
+        } else if (errorStr.includes('0x80070002')) {
+          throw new Error(
+            `File not found (0x80070002): The DLL file may not exist at ${dllPath}. ` +
+            `Original error: ${errorOutput}`
+          );
+        } else if (errorStr.includes('access') || errorStr.includes('denied') || errorStr.includes('permission')) {
+          throw new Error(
+            `Permission denied: regsvr32 requires administrator privileges. ` +
+            `Error: ${errorOutput}`
+          );
+        } else if (errorStr.includes('0x80040154') || errorStr.includes('class not registered')) {
+          throw new Error(
+            `Class not registered (0x80040154): The DLL may not be a valid COM component or may be missing dependencies. ` +
+            `Original error: ${errorOutput}`
+          );
+        }
+        
+        throw new Error(`Failed to register ${dllName}: ${errorOutput}`);
+      }
+    };
+    
+    await registerDll(
+      path.join(systemDir, keyProvFile),
+      keyProvFile
+    );
+    
+    await registerDll(
+      path.join(systemDir, certProvFile),
+      certProvFile
+    );
+    
     core.info(`   ✅ DLLs registered`);
 
     // Install service
