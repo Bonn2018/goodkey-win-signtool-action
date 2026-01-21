@@ -101,43 +101,52 @@ export async function installGoodKey(distDir: string, systemDir: string) {
       // Wait a bit to ensure file is not locked
       await new Promise(resolve => setTimeout(resolve, 300));
       
-      // Try registration without /s first to see the actual error
+      // Try registration with /s (silent) and /n (no prompt) to avoid hanging on dialog boxes
+      // Use PowerShell to capture errors since /s suppresses output
       try {
-        core.debug(`     Attempting registration (verbose mode to capture errors)...`);
-        const { stdout, stderr } = await execAsync(`regsvr32.exe "${dllPath}"`);
+        core.debug(`     Attempting registration (silent mode)...`);
         
-        if (stdout) {
-          core.debug(`     stdout: ${stdout}`);
-        }
-        if (stderr) {
-          core.debug(`     stderr: ${stderr}`);
-        }
-        
-        // Check if registration was successful
-        if (stdout.includes('succeeded') || stdout.includes('DllRegisterServer')) {
-          core.info(`     ✅ Registered successfully`);
-        } else {
-          // If no clear success message but no error, assume success and try silent mode for confirmation
-          core.debug(`     Retrying with silent mode for confirmation...`);
-          await execAsync(`regsvr32.exe /s "${dllPath}"`);
-          core.info(`     ✅ Registered successfully`);
-        }
+        // First, try with regsvr32 /s /n to avoid any prompts
+        // /s = silent, /n = no prompt (don't show success dialog)
+        await execAsync(`regsvr32.exe /s /n "${dllPath}"`);
+        core.info(`     ✅ Registered successfully`);
       } catch (error: any) {
         const errorOutput = error.stderr || error.stdout || error.message || '';
         core.error(`     ❌ Registration failed`);
         core.error(`     Error details: ${errorOutput}`);
         
-        // Try to get more details using PowerShell if available
+        // Try to get more details using PowerShell to capture the actual error
+        // PowerShell can capture errors even from silent regsvr32
         try {
+          core.debug(`     Attempting to get detailed error via PowerShell...`);
           const { stdout: psError } = await execAsync(
-            `powershell.exe -Command "$ErrorActionPreference='Continue'; try { regsvr32.exe '${dllPath}' 2>&1 | Out-String } catch { $_.Exception.Message }"`
+            `powershell.exe -Command "$ErrorActionPreference='Stop'; $output = regsvr32.exe /s /n '${dllPath}' 2>&1; if ($LASTEXITCODE -ne 0) { $output | Out-String } else { 'Success' }"`
           );
-          if (psError && psError.trim()) {
+          if (psError && psError.trim() && !psError.trim().includes('Success')) {
             core.error(`     PowerShell error output: ${psError.trim()}`);
           }
-        } catch (psErr) {
-          // Ignore PowerShell errors
-          core.debug(`     Could not get PowerShell error details: ${psErr}`);
+        } catch (psErr: any) {
+          // If PowerShell also fails, try to get error code
+          const psErrorMsg = psErr.stderr || psErr.stdout || psErr.message || '';
+          if (psErrorMsg) {
+            core.error(`     PowerShell error: ${psErrorMsg}`);
+          }
+        }
+        
+        // Also try to get error via Event Viewer or check registry
+        // But first, let's try one more approach - use regsvr32 with timeout and capture exit code
+        try {
+          core.debug(`     Checking registration status...`);
+          // Try to verify if registration actually succeeded despite the error
+          const { stdout: verifyOutput } = await execAsync(
+            `powershell.exe -Command "try { [System.Reflection.Assembly]::LoadFile('${dllPath}'); 'DLL can be loaded' } catch { 'DLL load failed: ' + $_.Exception.Message }"`
+          );
+          if (verifyOutput && verifyOutput.includes('can be loaded')) {
+            core.info(`     ⚠️  DLL appears to be loadable despite registration error - may have succeeded`);
+          }
+        } catch (verifyErr) {
+          // Ignore verification errors
+          core.debug(`     Could not verify DLL load status`);
         }
         
         // Check for specific error codes
